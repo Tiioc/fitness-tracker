@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Send, Trash2, Bot, User, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { getChatHistory, appendChat, clearChat, todayStr } from "@/lib/storage";
+import { getChatHistory, appendChat, clearChat } from "@/lib/storage";
 import type { ChatMessage } from "@/lib/types";
 
 const QUICK_PROMPTS = [

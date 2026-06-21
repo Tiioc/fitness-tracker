@@ -120,8 +120,8 @@ export default function ProgressPage() {
                   <XAxis dataKey="date" hide />
                   <Tooltip
                     contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: 8 }}
-                    formatter={(v: number) => [`${v} lbs`, "Weight"]}
-                    labelFormatter={(l) => formatDate(l)}
+                    formatter={(v) => [`${v} lbs`, "Weight"]}
+                    labelFormatter={(l) => formatDate(String(l))}
                   />
                   <Line type="monotone" dataKey="weight" stroke="#3b82f6" strokeWidth={2} dot={{ r: 3, fill: "#3b82f6" }} />
                 </LineChart>
@@ -166,8 +166,8 @@ export default function ProgressPage() {
                   <YAxis domain={["dataMin - 5", "dataMax + 5"]} tick={{ fontSize: 9, fill: "#6b7280" }} />
                   <Tooltip
                     contentStyle={{ background: "#1a1a1a", border: "1px solid #2a2a2a", borderRadius: 8 }}
-                    formatter={(v: number) => [`${v} lbs`, selectedExercise.split(" (")[0]]}
-                    labelFormatter={(l) => formatDate(l)}
+                    formatter={(v) => [`${v} lbs`, selectedExercise.split(" (")[0]]}
+                    labelFormatter={(l) => formatDate(String(l))}
                   />
                   <Line type="monotone" dataKey="weight" stroke="#3b82f6" strokeWidth={2.5} dot={{ r: 4, fill: "#3b82f6" }} activeDot={{ r: 6 }} />
                 </LineChart>
