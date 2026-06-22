@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Dumbbell, Flame, Scale, ChevronRight, Zap, Calendar, Activity, Moon, X } from "lucide-react";
+import { Dumbbell, Flame, Scale, ChevronRight, Zap, Calendar, Activity, Moon, X, Settings, Target } from "lucide-react";
 import {
   getSessionsForDate,
   getDailyMacros,
@@ -11,6 +11,7 @@ import {
   getRecentSessions,
   getOuraToken,
   saveOuraToken,
+  getProfile,
 } from "@/lib/storage";
 import { getTodayProgram } from "@/lib/program";
 import { cn, formatDate } from "@/lib/utils";
@@ -32,6 +33,7 @@ export default function Dashboard() {
   const [ouraData, setOuraData] = useState<OuraData | null>(null);
   const [showOuraSetup, setShowOuraSetup] = useState(false);
   const [ouraTokenInput, setOuraTokenInput] = useState("");
+  const [hasProfile, setHasProfile] = useState(true);
   const today = todayStr();
   const program = getTodayProgram();
 
@@ -53,6 +55,7 @@ export default function Dashboard() {
     setMacros(getDailyMacros(today));
     setLatestWeight(getLatestWeight()?.weight ?? null);
     setStreak(calcStreak());
+    setHasProfile(!!getProfile());
     const token = getOuraToken();
     setOuraConnected(!!token);
     if (token) fetchOura(token);
@@ -86,12 +89,33 @@ export default function Dashboard() {
   return (
     <div className="p-4 space-y-4">
       {/* Header */}
-      <div className="pt-10 pb-2">
-        <p className="text-gray-500 text-sm">{dayName}, {formatDate(today)}</p>
-        <h1 className="text-2xl font-bold mt-0.5">
-          {program ? `${program.name} Day` : "Rest Day"}
-        </h1>
+      <div className="pt-10 pb-2 flex items-start justify-between">
+        <div>
+          <p className="text-gray-500 text-sm">{dayName}, {formatDate(today)}</p>
+          <h1 className="text-2xl font-bold mt-0.5">
+            {program ? `${program.name} Day` : "Rest Day"}
+          </h1>
+        </div>
+        <Link href="/profile" className="mt-1 p-2 text-gray-500 hover:text-white transition-colors">
+          <Settings size={20} />
+        </Link>
       </div>
+
+      {/* First-run goal setup */}
+      {!hasProfile && (
+        <Link href="/profile" className="block">
+          <div className="bg-gradient-to-r from-blue-900/40 to-blue-800/20 border border-blue-800/40 rounded-2xl p-4 flex items-center gap-3">
+            <div className="bg-blue-500/20 rounded-full p-2">
+              <Target size={18} className="text-blue-400" />
+            </div>
+            <div className="flex-1">
+              <p className="font-medium text-sm">Set up your goals</p>
+              <p className="text-xs text-gray-400">Get calorie & macro targets based on your body and goal</p>
+            </div>
+            <ChevronRight size={16} className="text-gray-500" />
+          </div>
+        </Link>
+      )}
 
       {/* Stats row */}
       <div className="grid grid-cols-3 gap-3">

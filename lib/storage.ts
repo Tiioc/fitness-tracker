@@ -5,9 +5,12 @@ import type {
   BodyWeight,
   DailyTargets,
   ChatMessage,
+  UserProfile,
+  BodyMeasurement,
+  ProgressPhoto,
 } from "./types";
 
-// ── Generic helpers ──────────────────────────────────────────────────────────
+// ── Generic helpers ──────────────────────────────────────────────────────────────
 
 function get<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -135,6 +138,56 @@ export function getTargets(): DailyTargets {
 
 export function saveTargets(t: DailyTargets): void {
   set(TARGETS_KEY, t);
+}
+
+// ── User profile ────────────────────────────────────────────────────────────────
+
+const PROFILE_KEY = "fit_profile";
+
+export function getProfile(): UserProfile | null {
+  return get<UserProfile | null>(PROFILE_KEY, null);
+}
+
+export function saveProfile(p: UserProfile): void {
+  set(PROFILE_KEY, p);
+}
+
+// ── Body measurements ────────────────────────────────────────────────────────
+
+const MEAS_KEY = "fit_measurements";
+
+export function getMeasurements(): BodyMeasurement[] {
+  return [...get<BodyMeasurement[]>(MEAS_KEY, [])].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+export function saveMeasurement(m: BodyMeasurement): void {
+  const all = get<BodyMeasurement[]>(MEAS_KEY, []);
+  const idx = all.findIndex((x) => x.id === m.id);
+  if (idx >= 0) all[idx] = m;
+  else all.push(m);
+  set(MEAS_KEY, all);
+}
+
+export function deleteMeasurement(id: string): void {
+  set(MEAS_KEY, get<BodyMeasurement[]>(MEAS_KEY, []).filter((m) => m.id !== id));
+}
+
+// ── Progress photos ────────────────────────────────────────────────────────────
+
+const PHOTO_KEY = "fit_photos";
+
+export function getPhotos(): ProgressPhoto[] {
+  return [...get<ProgressPhoto[]>(PHOTO_KEY, [])].sort((a, b) => b.date.localeCompare(a.date));
+}
+
+export function savePhoto(p: ProgressPhoto): void {
+  const all = get<ProgressPhoto[]>(PHOTO_KEY, []);
+  all.push(p);
+  set(PHOTO_KEY, all);
+}
+
+export function deletePhoto(id: string): void {
+  set(PHOTO_KEY, get<ProgressPhoto[]>(PHOTO_KEY, []).filter((p) => p.id !== id));
 }
 
 // ── Chat history ─────────────────────────────────────────────────────────────
