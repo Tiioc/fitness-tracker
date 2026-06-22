@@ -119,10 +119,12 @@ export function getLatestWeight(): BodyWeight | undefined {
 
 const TARGETS_KEY = "fit_targets";
 
+// Higher-protein, lower-carb split for a lean/aesthetic goal.
+// 220p (880) + 200c (800) + 70f (630) ≈ 2310 kcal.
 const DEFAULT_TARGETS: DailyTargets = {
-  calories: 2400,
-  protein: 180,
-  carbs: 240,
+  calories: 2310,
+  protein: 220,
+  carbs: 200,
   fat: 70,
   steps: 10000,
 };
