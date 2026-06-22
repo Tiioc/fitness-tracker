@@ -1,16 +1,17 @@
 "use client";
 import { useEffect, useState, useRef } from "react";
 import {
-  Plus, Trash2, Check, ChevronDown, ChevronUp, X, History, Dumbbell, Clock
+  Plus, Trash2, Check, ChevronDown, ChevronUp, X, History, Dumbbell, Clock, Calculator, Search
 } from "lucide-react";
 import { toast } from "sonner";
-import { cn, formatDate, formatWeight, parseDuration } from "@/lib/utils";
+import { cn, formatDate, formatWeight, parseDuration, estimate1RM, platesPerSide } from "@/lib/utils";
 import {
   saveSession, getSessionsForDate, getRecentSessions, deleteSession,
   todayStr, uid, getLastPerformance,
 } from "@/lib/storage";
 import type { PrevPerf } from "@/lib/storage";
 import { getTodayProgram, PROGRAM } from "@/lib/program";
+import { searchExercises, MUSCLE_CATEGORIES, type MuscleCategory } from "@/lib/exercises";
 import type { WorkoutSession, WorkoutSet } from "@/lib/types";
 
 export default function WorkoutPage() {
@@ -27,7 +28,7 @@ export default function WorkoutPage() {
   }, [today]);
 
   function startSession(programIdx?: number) {
-    const p = programIdx !== undefined ? PROGRAM[programIdx] : program;
+    const p = programIdx !== undefined && programIdx >= 0 ? PROGRAM[programIdx] : (programIdx === undefined ? program : null);
     const name = p ? p.name : "Custom Workout";
     const sets: WorkoutSet[] = p
       ? p.exercises.flatMap((ex) =>
@@ -63,11 +64,11 @@ export default function WorkoutPage() {
     saveSession(updated);
   }
 
-  function updateSet(setId: string, field: "weight" | "reps", value: number) {
+  function updateSet(setId: string, patch: Partial<WorkoutSet>) {
     if (!session) return;
     const updated = {
       ...session,
-      sets: session.sets.map((s) => s.id === setId ? { ...s, [field]: value } : s),
+      sets: session.sets.map((s) => s.id === setId ? { ...s, ...patch } : s),
     };
     setSession(updated);
     saveSession(updated);
@@ -173,6 +174,12 @@ export default function WorkoutPage() {
             <Plus size={16} className="text-gray-500" />
           </button>
         ))}
+        <button
+          onClick={() => startSession(-1)}
+          className="w-full bg-[#1a1a1a] border border-dashed border-[#2a2a2a] rounded-xl p-3 flex items-center justify-center gap-2 text-gray-400 hover:border-blue-500/50 hover:text-blue-400 transition-colors"
+        >
+          <Plus size={16} /> <span className="text-sm font-medium">Empty Workout</span>
+        </button>
       </div>
 
       <button
@@ -194,7 +201,7 @@ function ActiveWorkout({
   session, onUpdateSet, onToggleSet, onAddSet, onRemoveSet, onAddExercise, onFinish, onDiscard,
 }: {
   session: WorkoutSession;
-  onUpdateSet: (id: string, field: "weight" | "reps", v: number) => void;
+  onUpdateSet: (id: string, patch: Partial<WorkoutSet>) => void;
   onToggleSet: (id: string) => void;
   onAddSet: (ex: string) => void;
   onRemoveSet: (id: string) => void;
@@ -202,8 +209,8 @@ function ActiveWorkout({
   onFinish: () => void;
   onDiscard: () => void;
 }) {
-  const [addingEx, setAddingEx] = useState(false);
-  const [newExName, setNewExName] = useState("");
+  const [picking, setPicking] = useState(false);
+  const [plateCalc, setPlateCalc] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [restRemaining, setRestRemaining] = useState<number | null>(null);
   const restTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -242,13 +249,16 @@ function ActiveWorkout({
     const set = session.sets.find(s => s.id === setId);
     const completing = set && !set.completed;
     onToggleSet(setId);
-    if (completing) startRestTimer();
+    if (completing && !set?.warmup) startRestTimer();
   }
 
   const mins = Math.floor(elapsed / 60);
   const secs = elapsed % 60;
   const completedCount = session.sets.filter((s) => s.completed).length;
   const totalSets = session.sets.length;
+  const totalVolume = session.sets
+    .filter((s) => s.completed && !s.warmup)
+    .reduce((a, s) => a + s.weight * s.reps, 0);
 
   const exercises = session.sets.reduce<Map<string, WorkoutSet[]>>((acc, s) => {
     const arr = acc.get(s.exerciseName) ?? [];
@@ -264,11 +274,15 @@ function ActiveWorkout({
         <div>
           <h2 className="font-bold">{session.name}</h2>
           <div className="flex items-center gap-3 text-xs text-gray-500">
-            <span className="flex items-center gap-1"><Clock size={11} />{String(mins).padStart(2,"0")}:{String(secs).padStart(2,"00")}</span>
+            <span className="flex items-center gap-1"><Clock size={11} />{String(mins).padStart(2,"0")}:{String(secs).padStart(2,"0")}</span>
             <span>{completedCount}/{totalSets} sets</span>
+            {totalVolume > 0 && <span>{totalVolume.toLocaleString()} lb vol</span>}
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-1.5 items-center">
+          <button onClick={() => setPlateCalc(true)} className="p-2 text-gray-400 hover:text-blue-400" aria-label="Plate calculator">
+            <Calculator size={18} />
+          </button>
           <button onClick={onDiscard} className="p-2 text-gray-500 hover:text-red-400">
             <X size={20} />
           </button>
@@ -296,37 +310,10 @@ function ActiveWorkout({
           );
         })}
 
-        {addingEx ? (
-          <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-2xl p-4 space-y-3">
-            <p className="font-medium text-sm">Add Exercise</p>
-            <input
-              autoFocus
-              className="w-full bg-[#111] border border-[#2a2a2a] rounded-xl px-3 py-2.5 text-sm text-white placeholder:text-gray-600 outline-none focus:border-blue-500"
-              placeholder="Exercise name..."
-              value={newExName}
-              onChange={(e) => setNewExName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && newExName.trim()) {
-                  onAddExercise(newExName.trim());
-                  setNewExName("");
-                  setAddingEx(false);
-                }
-              }}
-            />
-            <div className="flex gap-2">
-              <button onClick={() => setAddingEx(false)} className="flex-1 py-2 rounded-xl border border-[#2a2a2a] text-sm text-gray-400">Cancel</button>
-              <button
-                onClick={() => { if (newExName.trim()) { onAddExercise(newExName.trim()); setNewExName(""); setAddingEx(false); } }}
-                className="flex-1 py-2 rounded-xl bg-blue-600 text-sm font-medium text-white"
-              >Add</button>
-            </div>
-          </div>
-        ) : (
-          <button onClick={() => setAddingEx(true)} className="w-full bg-[#1a1a1a] border border-dashed border-[#2a2a2a] rounded-2xl p-4 flex items-center justify-center gap-2 text-gray-500 hover:border-blue-500/50 hover:text-blue-400 transition-colors">
-            <Plus size={18} />
-            <span className="text-sm">Add Exercise</span>
-          </button>
-        )}
+        <button onClick={() => setPicking(true)} className="w-full bg-[#1a1a1a] border border-dashed border-[#2a2a2a] rounded-2xl p-4 flex items-center justify-center gap-2 text-gray-500 hover:border-blue-500/50 hover:text-blue-400 transition-colors">
+          <Plus size={18} />
+          <span className="text-sm">Add Exercise</span>
+        </button>
       </div>
 
       {/* Rest Timer */}
@@ -350,11 +337,19 @@ function ActiveWorkout({
           </button>
         </div>
       )}
+
+      {picking && (
+        <ExercisePicker
+          onPick={(name) => { onAddExercise(name); setPicking(false); }}
+          onClose={() => setPicking(false)}
+        />
+      )}
+      {plateCalc && <PlateCalculator onClose={() => setPlateCalc(false)} />}
     </div>
   );
 }
 
-// ── Exercise Block ────────────────────────────────────────────────────────────────
+// ── Exercise Block ───────────────────────────────────────────────────────────────
 
 function ExerciseBlock({
   name, sets, prevPerf, onUpdate, onToggle, onAddSet, onRemoveSet,
@@ -362,18 +357,23 @@ function ExerciseBlock({
   name: string;
   sets: WorkoutSet[];
   prevPerf: PrevPerf | null;
-  onUpdate: (id: string, f: "weight" | "reps", v: number) => void;
+  onUpdate: (id: string, patch: Partial<WorkoutSet>) => void;
   onToggle: (id: string) => void;
   onAddSet: () => void;
   onRemoveSet: (id: string) => void;
 }) {
   const completed = sets.filter((s) => s.completed).length;
+  const working = sets.filter((s) => !s.warmup && s.weight > 0 && s.reps > 0);
+  const e1rm = working.length ? Math.max(...working.map((s) => estimate1RM(s.weight, s.reps))) : 0;
+
   return (
     <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-2xl overflow-hidden">
       <div className="px-4 py-3 flex items-center justify-between">
         <div>
           <p className="font-semibold text-sm">{name}</p>
-          <p className="text-xs text-gray-500">{completed}/{sets.length} sets done</p>
+          <p className="text-xs text-gray-500">
+            {completed}/{sets.length} sets{e1rm > 0 && <span className="text-blue-400"> · e1RM {e1rm} lb</span>}
+          </p>
         </div>
         <Dumbbell size={16} className="text-gray-600" />
       </div>
@@ -392,50 +392,64 @@ function ExerciseBlock({
         </div>
       )}
 
-      <div className="grid grid-cols-12 gap-2 px-4 pb-1 text-xs text-gray-600">
-        <span className="col-span-1">SET</span>
-        <span className="col-span-4 text-center">WEIGHT (lbs)</span>
-        <span className="col-span-4 text-center">REPS</span>
-        <span className="col-span-2 text-center">DONE</span>
+      <div className="grid grid-cols-12 gap-1.5 px-4 pb-1 text-[10px] text-gray-600">
+        <span className="col-span-2">SET</span>
+        <span className="col-span-3 text-center">LBS</span>
+        <span className="col-span-3 text-center">REPS</span>
+        <span className="col-span-2 text-center">RPE</span>
+        <span className="col-span-1 text-center">✓</span>
         <span className="col-span-1" />
       </div>
       <div className="divide-y divide-[#1f1f1f]">
         {sets.map((s, i) => (
-          <div key={s.id} className={cn("grid grid-cols-12 gap-2 items-center px-4 py-2.5 transition-colors", s.completed && "bg-green-900/10")}>
-            <span className="col-span-1 text-xs text-gray-500">{i + 1}</span>
-            <div className="col-span-4">
+          <div key={s.id} className={cn("grid grid-cols-12 gap-1.5 items-center px-4 py-2 transition-colors", s.completed && "bg-green-900/10")}>
+            <button
+              onClick={() => onUpdate(s.id, { warmup: !s.warmup })}
+              className={cn("col-span-2 text-xs font-medium text-left", s.warmup ? "text-amber-400" : "text-gray-500")}
+              title="Tap to toggle warmup"
+            >
+              {s.warmup ? "Warm" : i + 1}
+            </button>
+            <div className="col-span-3">
               <input
-                type="number"
-                inputMode="decimal"
-                className="w-full bg-[#111] border border-[#2a2a2a] rounded-lg px-2 py-1.5 text-sm text-center text-white outline-none focus:border-blue-500"
+                type="number" inputMode="decimal"
+                className="w-full bg-[#111] border border-[#2a2a2a] rounded-lg px-1.5 py-1.5 text-sm text-center text-white outline-none focus:border-blue-500"
                 value={s.weight || ""}
                 placeholder={prevPerf?.sets[i]?.weight ? String(prevPerf.sets[i].weight) : "0"}
-                onChange={(e) => onUpdate(s.id, "weight", parseFloat(e.target.value) || 0)}
+                onChange={(e) => onUpdate(s.id, { weight: parseFloat(e.target.value) || 0 })}
               />
             </div>
-            <div className="col-span-4">
+            <div className="col-span-3">
               <input
-                type="number"
-                inputMode="numeric"
-                className="w-full bg-[#111] border border-[#2a2a2a] rounded-lg px-2 py-1.5 text-sm text-center text-white outline-none focus:border-blue-500"
+                type="number" inputMode="numeric"
+                className="w-full bg-[#111] border border-[#2a2a2a] rounded-lg px-1.5 py-1.5 text-sm text-center text-white outline-none focus:border-blue-500"
                 value={s.reps || ""}
                 placeholder={prevPerf?.sets[i]?.reps ? String(prevPerf.sets[i].reps) : "0"}
-                onChange={(e) => onUpdate(s.id, "reps", parseInt(e.target.value) || 0)}
+                onChange={(e) => onUpdate(s.id, { reps: parseInt(e.target.value) || 0 })}
               />
             </div>
-            <div className="col-span-2 flex justify-center">
+            <div className="col-span-2">
+              <input
+                type="number" inputMode="decimal"
+                className="w-full bg-[#111] border border-[#2a2a2a] rounded-lg px-1 py-1.5 text-sm text-center text-white outline-none focus:border-blue-500"
+                value={s.rpe ?? ""}
+                placeholder="–"
+                onChange={(e) => onUpdate(s.id, { rpe: parseFloat(e.target.value) || undefined })}
+              />
+            </div>
+            <div className="col-span-1 flex justify-center">
               <button
                 onClick={() => onToggle(s.id)}
                 className={cn(
-                  "w-8 h-8 rounded-full border-2 flex items-center justify-center transition-colors",
+                  "w-7 h-7 rounded-full border-2 flex items-center justify-center transition-colors",
                   s.completed ? "bg-green-500 border-green-500" : "border-[#3a3a3a]"
                 )}
               >
-                {s.completed && <Check size={14} />}
+                {s.completed && <Check size={13} />}
               </button>
             </div>
             <div className="col-span-1 flex justify-end">
-              <button onClick={() => onRemoveSet(s.id)} className="text-gray-600 hover:text-red-400 p-1">
+              <button onClick={() => onRemoveSet(s.id)} className="text-gray-600 hover:text-red-400 p-0.5">
                 <Trash2 size={12} />
               </button>
             </div>
@@ -451,7 +465,114 @@ function ExerciseBlock({
   );
 }
 
-// ── History View ────────────────────────────────────────────────────────────────
+// ── Exercise Picker ──────────────────────────────────────────────────────────────
+
+function ExercisePicker({ onPick, onClose }: { onPick: (name: string) => void; onClose: () => void }) {
+  const [q, setQ] = useState("");
+  const [cat, setCat] = useState<MuscleCategory | null>(null);
+  const results = searchExercises(q, cat ?? undefined);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-end" onClick={onClose}>
+      <div className="w-full max-w-lg mx-auto bg-[#111] border-t border-[#2a2a2a] rounded-t-3xl max-h-[88vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="pt-3 flex justify-center"><div className="w-10 h-1 rounded-full bg-[#333]" /></div>
+        <div className="px-5 pt-3 pb-2 flex items-center justify-between">
+          <h3 className="font-bold">Add Exercise</h3>
+          <button onClick={onClose} className="p-1 text-gray-500"><X size={20} /></button>
+        </div>
+        <div className="px-5 pb-2 space-y-3">
+          <div className="relative">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+            <input
+              autoFocus
+              className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl pl-9 pr-4 py-3 text-sm text-white placeholder:text-gray-600 outline-none focus:border-blue-500"
+              placeholder="Search exercises..."
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </div>
+          <div className="flex gap-2 overflow-x-auto no-scrollbar">
+            <button onClick={() => setCat(null)} className={cn("shrink-0 px-3 py-1.5 rounded-full text-xs font-medium border", cat === null ? "bg-blue-600 border-blue-600 text-white" : "border-[#2a2a2a] text-gray-400")}>All</button>
+            {MUSCLE_CATEGORIES.map((c) => (
+              <button key={c} onClick={() => setCat(c)} className={cn("shrink-0 px-3 py-1.5 rounded-full text-xs font-medium border", cat === c ? "bg-blue-600 border-blue-600 text-white" : "border-[#2a2a2a] text-gray-400")}>{c}</button>
+            ))}
+          </div>
+        </div>
+        <div className="px-5 pb-5 overflow-y-auto space-y-1.5">
+          {results.map((e) => (
+            <button key={e.name} onClick={() => onPick(e.name)} className="w-full text-left px-3 py-2.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl active:bg-[#222] transition-colors flex items-center justify-between">
+              <span className="text-sm">{e.name}</span>
+              <span className="text-[10px] text-gray-500">{e.equipment}</span>
+            </button>
+          ))}
+          {q.trim() && (
+            <button onClick={() => onPick(q.trim())} className="w-full text-left px-3 py-2.5 border border-dashed border-[#2a2a2a] rounded-xl text-sm text-gray-400 active:bg-[#1a1a1a]">
+              + Add &quot;{q.trim()}&quot; as custom
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Plate Calculator ──────────────────────────────────────────────────────────
+
+function PlateCalculator({ onClose }: { onClose: () => void }) {
+  const [weight, setWeight] = useState("135");
+  const [bar, setBar] = useState(45);
+  const target = parseFloat(weight) || 0;
+  const plates = platesPerSide(target, bar);
+  const achievable = bar + plates.reduce((a, p) => a + p.plate * p.count, 0) * 2;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-end" onClick={onClose}>
+      <div className="w-full max-w-lg mx-auto bg-[#111] border-t border-[#2a2a2a] rounded-t-3xl p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between">
+          <h3 className="font-bold">Plate Calculator</h3>
+          <button onClick={onClose} className="p-1 text-gray-500"><X size={20} /></button>
+        </div>
+        <div className="space-y-2">
+          <label className="text-xs text-gray-500">Target weight (lbs)</label>
+          <input
+            type="number" inputMode="decimal" autoFocus
+            className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl px-4 py-3 text-lg font-semibold text-center text-white outline-none focus:border-blue-500"
+            value={weight}
+            onChange={(e) => setWeight(e.target.value)}
+          />
+        </div>
+        <div className="flex gap-2">
+          {[45, 35].map((b) => (
+            <button key={b} onClick={() => setBar(b)} className={cn("flex-1 py-2 rounded-xl text-xs font-medium border", bar === b ? "bg-blue-600 border-blue-600 text-white" : "border-[#2a2a2a] text-gray-400")}>
+              {b} lb bar
+            </button>
+          ))}
+        </div>
+        <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-2xl p-4">
+          {plates.length > 0 ? (
+            <>
+              <p className="text-xs text-gray-500 mb-2">Per side:</p>
+              <div className="flex flex-wrap gap-2">
+                {plates.map((p) => (
+                  <span key={p.plate} className="bg-blue-600/20 text-blue-300 border border-blue-600/40 rounded-lg px-3 py-1.5 text-sm font-semibold">
+                    {p.count} × {p.plate}
+                  </span>
+                ))}
+              </div>
+              {achievable !== target && (
+                <p className="text-xs text-amber-400 mt-3">Closest loadable: {achievable} lb</p>
+              )}
+            </>
+          ) : (
+            <p className="text-sm text-gray-500 text-center">Just the {bar} lb bar.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── History View ───────────────────────────────────────────────────────────────
 
 function HistoryView({
   sessions, onBack, onDelete,
@@ -472,6 +593,7 @@ function HistoryView({
         const open = expanded === s.id;
         const dur = parseDuration(s.startTime, s.endTime);
         const totalSets = s.sets.length;
+        const vol = s.sets.filter((st) => !st.warmup).reduce((a, st) => a + st.weight * st.reps, 0);
         const exNames = [...new Set(s.sets.map((st) => st.exerciseName))];
         return (
           <div key={s.id} className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-2xl overflow-hidden">
@@ -481,7 +603,7 @@ function HistoryView({
             >
               <div>
                 <p className="font-semibold text-sm">{s.name}</p>
-                <p className="text-xs text-gray-500">{formatDate(s.date)} · {totalSets} sets · {dur}</p>
+                <p className="text-xs text-gray-500">{formatDate(s.date)} · {totalSets} sets · {dur}{vol > 0 ? ` · ${vol.toLocaleString()} lb` : ""}</p>
               </div>
               {open ? <ChevronUp size={16} className="text-gray-500" /> : <ChevronDown size={16} className="text-gray-500" />}
             </button>
@@ -495,7 +617,7 @@ function HistoryView({
                       <div className="space-y-0.5">
                         {exSets.map((st, i) => (
                           <p key={st.id} className="text-xs text-gray-600">
-                            Set {i + 1}: {formatWeight(st.weight)} × {st.reps} reps
+                            {st.warmup ? "Warmup" : `Set ${i + 1}`}: {formatWeight(st.weight)} × {st.reps} reps{st.rpe ? ` @ RPE ${st.rpe}` : ""}
                           </p>
                         ))}
                       </div>

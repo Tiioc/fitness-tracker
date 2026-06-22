@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState, useRef } from "react";
-import { Plus, Trash2, Search, X, ChevronLeft, PencilLine } from "lucide-react";
+import dynamic from "next/dynamic";
+import { Plus, Trash2, Search, X, ChevronLeft, PencilLine, ScanLine } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
@@ -8,15 +9,17 @@ import {
   getTargets, todayStr, uid,
 } from "@/lib/storage";
 import type { FoodEntry } from "@/lib/types";
-import { searchCommonFoods } from "@/lib/foods";
+import { searchCommonFoods, defaultGrams, type Serving } from "@/lib/foods";
 import { mealTarget } from "@/lib/nutrition";
+
+const BarcodeScanner = dynamic(() => import("@/components/BarcodeScanner"), { ssr: false });
 
 type Meal = FoodEntry["meal"];
 const MEALS: Meal[] = ["breakfast", "lunch", "dinner", "snack"];
 const MEAL_EMOJI: Record<Meal, string> = { breakfast: "🍳", lunch: "🥗", dinner: "🍽️", snack: "🍎" };
 
 interface Macros { calories: number; protein: number; carbs: number; fat: number }
-interface FoodSearchResult extends Macros { name: string; servingSize?: string }
+interface FoodSearchResult extends Macros { name: string; servingSize?: string; servings?: Serving[] }
 
 const GRAM_PRESETS = [50, 100, 150, 200, 250];
 
@@ -54,6 +57,7 @@ export default function FoodPage() {
   // Portion step (scales a per-100g base)
   const [base, setBase] = useState<FoodSearchResult | null>(null);
   const [grams, setGrams] = useState("100");
+  const [scanning, setScanning] = useState(false);
 
   // Manual step
   const [manual, setManual] = useState({ name: "", calories: "", protein: "", carbs: "", fat: "" });
@@ -108,8 +112,20 @@ export default function FoodPage() {
 
   function pickSearch(r: FoodSearchResult) {
     setBase(r);
-    setGrams("100");
+    setGrams(String(defaultGrams(r)));
     setStep("portion");
+  }
+
+  async function lookupBarcode(code: string) {
+    setScanning(false);
+    try {
+      const res = await fetch(`/api/barcode?code=${encodeURIComponent(code)}`);
+      if (!res.ok) { toast.error("Product not found — try search or manual entry"); return; }
+      const r: FoodSearchResult = await res.json();
+      pickSearch(r);
+    } catch {
+      toast.error("Barcode lookup failed");
+    }
   }
 
   function logScaled() {
@@ -156,6 +172,7 @@ export default function FoodPage() {
 
   return (
     <div className="p-4 space-y-4 pt-10">
+      {scanning && <BarcodeScanner onDetected={lookupBarcode} onClose={() => setScanning(false)} />}
       <h1 className="text-2xl font-bold">Nutrition</h1>
 
       {/* Calorie ring summary */}
@@ -299,15 +316,24 @@ export default function FoodPage() {
                     </div>
                   )}
 
-                  <div className="relative">
-                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-                    <input
-                      autoFocus
-                      className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl pl-9 pr-4 py-3 text-sm text-white placeholder:text-gray-600 outline-none focus:border-blue-500"
-                      placeholder="Search any food..."
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                    />
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+                      <input
+                        autoFocus
+                        className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl pl-9 pr-4 py-3 text-sm text-white placeholder:text-gray-600 outline-none focus:border-blue-500"
+                        placeholder="Search any food..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                      />
+                    </div>
+                    <button
+                      onClick={() => setScanning(true)}
+                      className="shrink-0 px-3.5 rounded-xl bg-[#1a1a1a] border border-[#2a2a2a] text-blue-400 active:bg-[#222] transition-colors flex items-center justify-center"
+                      aria-label="Scan barcode"
+                    >
+                      <ScanLine size={18} />
+                    </button>
                   </div>
 
                   {(() => {
@@ -357,12 +383,31 @@ export default function FoodPage() {
                     <p className="text-xs text-gray-500">{base.calories} kcal · P {base.protein} · C {base.carbs} · F {base.fat} per 100g</p>
                   </div>
 
+                  {base.servings && base.servings.length > 0 && (
+                    <div className="space-y-1.5">
+                      <label className="text-xs text-gray-500">Serving</label>
+                      <div className="flex gap-2 flex-wrap">
+                        {base.servings.map((sv) => (
+                          <button
+                            key={sv.label}
+                            onClick={() => setGrams(String(sv.grams))}
+                            className={cn(
+                              "px-3 py-1.5 rounded-full text-xs font-medium border transition-colors",
+                              String(sv.grams) === grams ? "bg-blue-600 border-blue-600 text-white" : "border-[#2a2a2a] text-gray-400"
+                            )}
+                          >
+                            {sv.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="space-y-2">
                     <label className="text-xs text-gray-500">How much? (grams)</label>
                     <input
                       type="number"
                       inputMode="decimal"
-                      autoFocus
                       className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl px-4 py-3 text-lg font-semibold text-center text-white outline-none focus:border-blue-500"
                       value={grams}
                       onChange={(e) => setGrams(e.target.value)}
