@@ -19,10 +19,19 @@ const MEALS: Meal[] = ["breakfast", "lunch", "dinner", "snack"];
 const MEAL_EMOJI: Record<Meal, string> = { breakfast: "🍳", lunch: "🥗", dinner: "🍽️", snack: "🍎" };
 const MEAL_LABEL: Record<Meal, string> = { breakfast: "Breakfast", lunch: "Lunch", dinner: "Dinner", snack: "Snack" };
 
+type Unit = "g" | "oz" | "cup" | "tbsp" | "tsp";
+const UNIT_TO_G: Record<Unit, number> = { g: 1, oz: 28.35, cup: 240, tbsp: 15, tsp: 5 };
+const UNITS: Unit[] = ["g", "oz", "cup", "tbsp", "tsp"];
+const UNIT_PRESETS: Record<Unit, number[]> = {
+  g:    [50, 100, 150, 200, 250],
+  oz:   [1, 2, 3, 4, 6],
+  cup:  [0.25, 0.5, 0.75, 1, 2],
+  tbsp: [1, 2, 3, 4],
+  tsp:  [1, 2, 3],
+};
+
 interface Macros { calories: number; protein: number; carbs: number; fat: number }
 interface FoodSearchResult extends Macros { name: string; servingSize?: string; servings?: Serving[] }
-
-const GRAM_PRESETS = [50, 100, 150, 200, 250];
 
 async function searchFood(query: string): Promise<FoodSearchResult[]> {
   const res = await fetch(`/api/food-search?q=${encodeURIComponent(query)}`);
@@ -34,34 +43,38 @@ function scale(base: Macros, grams: number): Macros {
   const f = grams / 100;
   return {
     calories: Math.round(base.calories * f),
-    protein: Math.round(base.protein * f),
-    carbs: Math.round(base.carbs * f),
-    fat: Math.round(base.fat * f),
+    protein:  Math.round(base.protein  * f),
+    carbs:    Math.round(base.carbs    * f),
+    fat:      Math.round(base.fat      * f),
   };
 }
 
 export default function FoodPage() {
   const today = todayStr();
-  const [entries, setEntries] = useState<FoodEntry[]>([]);
-  const [macros, setMacros] = useState<Macros>({ calories: 0, protein: 0, carbs: 0, fat: 0 });
-  const [targets] = useState(getTargets());
-  const [recent, setRecent] = useState<FoodEntry[]>([]);
+  const [entries, setEntries]   = useState<FoodEntry[]>([]);
+  const [macros, setMacros]     = useState<Macros>({ calories: 0, protein: 0, carbs: 0, fat: 0 });
+  const [targets]               = useState(getTargets());
+  const [recent, setRecent]     = useState<FoodEntry[]>([]);
 
-  const [adding, setAdding] = useState<Meal | null>(null);
-  const [step, setStep] = useState<"pick" | "portion" | "manual">("pick");
+  const [adding, setAdding]     = useState<Meal | null>(null);
+  const [step, setStep]         = useState<"pick" | "portion" | "manual">("pick");
 
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery]   = useState("");
   const [localResults, setLocalResults] = useState<FoodSearchResult[]>([]);
   const [searchResults, setSearchResults] = useState<FoodSearchResult[]>([]);
-  const [searching, setSearching] = useState(false);
+  const [searching, setSearching]       = useState(false);
 
-  const [base, setBase] = useState<FoodSearchResult | null>(null);
-  const [grams, setGrams] = useState("100");
+  const [base, setBase]         = useState<FoodSearchResult | null>(null);
+  const [amount, setAmount]     = useState("100");
+  const [unit, setUnit]         = useState<Unit>("g");
   const [scanning, setScanning] = useState(false);
 
   const [manual, setManual] = useState({ name: "", calories: "", protein: "", carbs: "", fat: "" });
-
   const searchRef = useRef<ReturnType<typeof setTimeout>>();
+
+  // Derive effective grams from current amount + unit
+  const effectiveGrams = (parseFloat(amount) || 0) * UNIT_TO_G[unit];
+  const preview = base ? scale(base, effectiveGrams) : null;
 
   function getRecentFoods(): FoodEntry[] {
     const all = getFoodEntries();
@@ -104,15 +117,27 @@ export default function FoodPage() {
     setSearchResults([]);
     setLocalResults([]);
     setBase(null);
-    setGrams("100");
+    setAmount("100");
+    setUnit("g");
     setManual({ name: "", calories: "", protein: "", carbs: "", fat: "" });
   }
   function closeSheet() { setAdding(null); }
 
   function pickFood(r: FoodSearchResult) {
     setBase(r);
-    setGrams(String(defaultGrams(r)));
+    setAmount(String(defaultGrams(r)));
+    setUnit("g");
     setStep("portion");
+  }
+
+  // When user switches unit, auto-convert the current amount
+  function changeUnit(newUnit: Unit) {
+    const curG = (parseFloat(amount) || 0) * UNIT_TO_G[unit];
+    if (curG > 0) {
+      const converted = curG / UNIT_TO_G[newUnit];
+      setAmount(String(Math.round(converted * 10) / 10));
+    }
+    setUnit(newUnit);
   }
 
   async function lookupBarcode(code: string) {
@@ -129,9 +154,12 @@ export default function FoodPage() {
 
   function logScaled() {
     if (!adding || !base) return;
-    const g = parseFloat(grams) || 0;
-    if (g <= 0) { toast.error("Enter a portion size"); return; }
-    saveFoodEntry({ id: uid(), date: today, meal: adding, name: base.name, ...scale(base, g), grams: g });
+    if (effectiveGrams <= 0) { toast.error("Enter a portion size"); return; }
+    saveFoodEntry({
+      id: uid(), date: today, meal: adding, name: base.name,
+      ...scale(base, effectiveGrams),
+      grams: Math.round(effectiveGrams),
+    });
     reload();
     toast.success(`${base.name} added to ${MEAL_LABEL[adding].toLowerCase()}`);
     closeSheet();
@@ -141,9 +169,9 @@ export default function FoodPage() {
     if (!adding) return;
     if (!manual.name.trim()) { toast.error("Enter a food name"); return; }
     const cal = parseFloat(manual.calories) || 0;
-    const p = parseFloat(manual.protein) || 0;
-    const c = parseFloat(manual.carbs) || 0;
-    const f = parseFloat(manual.fat) || 0;
+    const p   = parseFloat(manual.protein)  || 0;
+    const c   = parseFloat(manual.carbs)    || 0;
+    const f   = parseFloat(manual.fat)      || 0;
     if (cal <= 0 && p <= 0 && c <= 0 && f <= 0) { toast.error("Enter calories or macros"); return; }
     saveFoodEntry({
       id: uid(), date: today, meal: adding, name: manual.name.trim(),
@@ -163,15 +191,16 @@ export default function FoodPage() {
   }
 
   const remaining = targets.calories - macros.calories;
-  const preview = base ? scale(base, parseFloat(grams) || 0) : null;
   const autoCals = (() => {
-    const p = parseFloat(manual.protein) || 0, c = parseFloat(manual.carbs) || 0, f = parseFloat(manual.fat) || 0;
+    const p = parseFloat(manual.protein) || 0;
+    const c = parseFloat(manual.carbs)   || 0;
+    const f = parseFloat(manual.fat)     || 0;
     return Math.round(p * 4 + c * 4 + f * 9);
   })();
 
   const canLog =
-    step === "portion" ? (base !== null && (parseFloat(grams) || 0) > 0) :
-    step === "manual" ? (manual.name.trim().length > 0) : false;
+    step === "portion" ? (base !== null && effectiveGrams > 0) :
+    step === "manual"  ? (manual.name.trim().length > 0) : false;
 
   return (
     <div className="p-4 space-y-4 pt-10 pb-24">
@@ -197,25 +226,24 @@ export default function FoodPage() {
         </div>
         <div className="grid grid-cols-3 gap-3 pt-1">
           <MacroChip label="Protein" value={macros.protein} target={targets.protein} color="text-blue-400" />
-          <MacroChip label="Carbs" value={macros.carbs} target={targets.carbs} color="text-yellow-400" />
-          <MacroChip label="Fat" value={macros.fat} target={targets.fat} color="text-red-400" />
+          <MacroChip label="Carbs"   value={macros.carbs}   target={targets.carbs}   color="text-yellow-400" />
+          <MacroChip label="Fat"     value={macros.fat}     target={targets.fat}     color="text-red-400" />
         </div>
       </div>
 
       {/* Meals */}
       {MEALS.map((meal) => {
         const mealEntries = entries.filter((e) => e.meal === meal);
-        const mealCals = mealEntries.reduce((s, e) => s + e.calories, 0);
-        const mt = mealTarget(meal, targets);
-        const logged = mealEntries.reduce(
+        const mealCals    = mealEntries.reduce((s, e) => s + e.calories, 0);
+        const mt          = mealTarget(meal, targets);
+        const logged      = mealEntries.reduce(
           (a, e) => ({ p: a.p + e.protein, c: a.c + e.carbs, f: a.f + e.fat }),
-          { p: 0, c: 0, f: 0 }
+          { p: 0, c: 0, f: 0 },
         );
         const calPct = Math.min(100, mt.calories > 0 ? (mealCals / mt.calories) * 100 : 0);
 
         return (
           <div key={meal} className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-2xl overflow-hidden">
-            {/* Meal header — info only */}
             <div className="px-4 pt-3 pb-2.5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
@@ -242,7 +270,6 @@ export default function FoodPage() {
               <p className="mt-1 text-[10px] text-gray-600">{mt.note}</p>
             </div>
 
-            {/* Logged items */}
             {mealEntries.length > 0 && (
               <div className="border-t border-[#2a2a2a] divide-y divide-[#1f1f1f]">
                 {mealEntries.map((e) => (
@@ -265,7 +292,6 @@ export default function FoodPage() {
               </div>
             )}
 
-            {/* Add button — clearly separate */}
             <div className="border-t border-[#2a2a2a]">
               <button
                 onClick={() => openSheet(meal)}
@@ -316,7 +342,9 @@ export default function FoodPage() {
                     <p className="text-xs text-gray-500">{MEAL_EMOJI[adding]} {MEAL_LABEL[adding]}</p>
                   )}
                   {step === "portion" && base && (
-                    <p className="text-xs text-gray-500">{base.calories} kcal · P {base.protein}g · C {base.carbs}g · F {base.fat}g per 100g</p>
+                    <p className="text-xs text-gray-500">
+                      {base.calories} kcal · P {base.protein}g · C {base.carbs}g · F {base.fat}g per 100g
+                    </p>
                   )}
                 </div>
               </div>
@@ -353,8 +381,8 @@ export default function FoodPage() {
                   {/* Search results */}
                   {(() => {
                     const localNames = new Set(localResults.map((r) => r.name.toLowerCase()));
-                    const branded = searchResults.filter((r) => !localNames.has(r.name.toLowerCase()));
-                    const combined = [...localResults, ...branded];
+                    const branded    = searchResults.filter((r) => !localNames.has(r.name.toLowerCase()));
+                    const combined   = [...localResults, ...branded];
                     if (combined.length > 0) {
                       return (
                         <div className="space-y-1.5">
@@ -377,8 +405,8 @@ export default function FoodPage() {
                         </div>
                       );
                     }
-                    if (searching) return <p className="text-xs text-gray-500 text-center py-4">Searching…</p>;
-                    if (searchQuery.trim()) return <p className="text-xs text-gray-500 text-center py-4">No matches — try manual entry below.</p>;
+                    if (searching)           return <p className="text-xs text-gray-500 text-center py-4">Searching…</p>;
+                    if (searchQuery.trim())  return <p className="text-xs text-gray-500 text-center py-4">No matches — try manual entry below.</p>;
                     return null;
                   })()}
 
@@ -419,55 +447,88 @@ export default function FoodPage() {
               {/* STEP: PORTION */}
               {step === "portion" && base && (
                 <>
-                  {/* Serving size chips */}
+                  {/* Common servings from food DB */}
                   {base.servings && base.servings.length > 0 && (
                     <div className="space-y-2">
-                      <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Serving size</p>
+                      <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Common servings</p>
                       <div className="flex gap-2 flex-wrap">
-                        {base.servings.map((sv) => (
-                          <button
-                            key={sv.label}
-                            onClick={() => setGrams(String(sv.grams))}
-                            className={cn(
-                              "px-3.5 py-1.5 rounded-full text-sm font-medium border transition-colors",
-                              String(sv.grams) === grams
-                                ? "bg-blue-600 border-blue-600 text-white"
-                                : "border-[#2a2a2a] text-gray-400 bg-[#1a1a1a]"
-                            )}
-                          >
-                            {sv.label}
-                          </button>
-                        ))}
+                        {base.servings.map((sv) => {
+                          const isActive = unit === "g" && String(sv.grams) === amount;
+                          return (
+                            <button
+                              key={sv.label}
+                              onClick={() => { setUnit("g"); setAmount(String(sv.grams)); }}
+                              className={cn(
+                                "px-3.5 py-1.5 rounded-full text-sm font-medium border transition-colors",
+                                isActive
+                                  ? "bg-blue-600 border-blue-600 text-white"
+                                  : "border-[#2a2a2a] text-gray-400 bg-[#1a1a1a]",
+                              )}
+                            >
+                              {sv.label}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   )}
 
-                  {/* Gram input */}
+                  {/* Unit selector */}
                   <div className="space-y-2">
-                    <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Amount (grams)</p>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl px-4 py-3 text-3xl font-bold text-center text-white outline-none focus:border-blue-500"
-                      value={grams}
-                      onChange={(e) => setGrams(e.target.value)}
-                    />
-                    <div className="flex gap-2">
-                      {GRAM_PRESETS.map((g) => (
+                    <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Unit</p>
+                    <div className="flex gap-1.5">
+                      {UNITS.map((u) => (
                         <button
-                          key={g}
-                          onClick={() => setGrams(String(g))}
+                          key={u}
+                          onClick={() => changeUnit(u)}
                           className={cn(
-                            "flex-1 py-1.5 rounded-lg text-xs font-medium border transition-colors",
-                            String(g) === grams
+                            "flex-1 py-2 rounded-lg text-xs font-semibold border transition-colors",
+                            unit === u
                               ? "bg-blue-600 border-blue-600 text-white"
-                              : "border-[#2a2a2a] text-gray-400 bg-[#1a1a1a]"
+                              : "border-[#2a2a2a] text-gray-400 bg-[#1a1a1a]",
                           )}
                         >
-                          {g}g
+                          {u}
                         </button>
                       ))}
                     </div>
+                  </div>
+
+                  {/* Amount input */}
+                  <div className="space-y-2">
+                    <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Amount</p>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl px-4 pr-16 py-3 text-3xl font-bold text-center text-white outline-none focus:border-blue-500"
+                        value={amount}
+                        onChange={(e) => setAmount(e.target.value)}
+                      />
+                      <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 text-sm font-medium pointer-events-none">
+                        {unit}
+                      </span>
+                    </div>
+                    {/* Quick presets for current unit */}
+                    <div className="flex gap-1.5">
+                      {UNIT_PRESETS[unit].map((p) => (
+                        <button
+                          key={p}
+                          onClick={() => setAmount(String(p))}
+                          className={cn(
+                            "flex-1 py-1.5 rounded-lg text-xs font-medium border transition-colors",
+                            String(p) === amount
+                              ? "bg-blue-600 border-blue-600 text-white"
+                              : "border-[#2a2a2a] text-gray-400 bg-[#1a1a1a]",
+                          )}
+                        >
+                          {p}
+                        </button>
+                      ))}
+                    </div>
+                    {unit !== "g" && effectiveGrams > 0 && (
+                      <p className="text-xs text-gray-600 text-center">≈ {Math.round(effectiveGrams)}g</p>
+                    )}
                   </div>
 
                   {/* Live macro preview */}
@@ -506,10 +567,10 @@ export default function FoodPage() {
                     onChange={(e) => setManual((m) => ({ ...m, name: e.target.value }))}
                   />
                   <div className="grid grid-cols-2 gap-2.5">
-                    <NumInput label="Calories" value={manual.calories} onChange={(v) => setManual((m) => ({ ...m, calories: v }))} />
-                    <NumInput label="Protein (g)" value={manual.protein} onChange={(v) => setManual((m) => ({ ...m, protein: v }))} />
-                    <NumInput label="Carbs (g)" value={manual.carbs} onChange={(v) => setManual((m) => ({ ...m, carbs: v }))} />
-                    <NumInput label="Fat (g)" value={manual.fat} onChange={(v) => setManual((m) => ({ ...m, fat: v }))} />
+                    <NumInput label="Calories"   value={manual.calories} onChange={(v) => setManual((m) => ({ ...m, calories: v }))} />
+                    <NumInput label="Protein (g)" value={manual.protein}  onChange={(v) => setManual((m) => ({ ...m, protein: v }))} />
+                    <NumInput label="Carbs (g)"   value={manual.carbs}    onChange={(v) => setManual((m) => ({ ...m, carbs: v }))} />
+                    <NumInput label="Fat (g)"     value={manual.fat}      onChange={(v) => setManual((m) => ({ ...m, fat: v }))} />
                   </div>
                   {!manual.calories && autoCals > 0 && (
                     <button
@@ -524,9 +585,12 @@ export default function FoodPage() {
 
             </div>{/* end scrollable body */}
 
-            {/* ── Fixed footer: Log button — always visible above keyboard ── */}
+            {/* ── Fixed footer: Log button — stays above keyboard & home bar ── */}
             {(step === "portion" || step === "manual") && (
-              <div className="px-5 pt-3 pb-8 shrink-0 border-t border-[#2a2a2a] bg-[#111]">
+              <div
+                className="px-5 pt-3 shrink-0 border-t border-[#2a2a2a] bg-[#111]"
+                style={{ paddingBottom: "max(1.25rem, env(safe-area-inset-bottom, 1.25rem))" }}
+              >
                 <button
                   onClick={step === "portion" ? logScaled : logManual}
                   disabled={!canLog}
@@ -534,7 +598,7 @@ export default function FoodPage() {
                     "w-full py-4 rounded-2xl text-base font-bold transition-colors",
                     canLog
                       ? "bg-blue-600 text-white active:bg-blue-500"
-                      : "bg-[#2a2a2a] text-gray-600 cursor-not-allowed"
+                      : "bg-[#2a2a2a] text-gray-600 cursor-not-allowed",
                   )}
                 >
                   Log to {MEAL_LABEL[adding]}
@@ -553,7 +617,9 @@ export default function FoodPage() {
 
 function MacroChip({
   label, value, target, color,
-}: { label: string; value: number; target: number; color: string }) {
+}: {
+  label: string; value: number; target: number; color: string;
+}) {
   const pct = Math.min(100, target > 0 ? (value / target) * 100 : 0);
   return (
     <div className="space-y-1.5">
@@ -574,7 +640,9 @@ function MacroChip({
 
 function NumInput({
   label, value, onChange,
-}: { label: string; value: string; onChange: (v: string) => void }) {
+}: {
+  label: string; value: string; onChange: (v: string) => void;
+}) {
   return (
     <div className="space-y-1">
       <label className="text-xs text-gray-500">{label}</label>
