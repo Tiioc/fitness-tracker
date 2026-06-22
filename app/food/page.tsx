@@ -1,12 +1,15 @@
 "use client";
 import { useEffect, useState, useRef } from "react";
 import dynamic from "next/dynamic";
-import { Plus, Trash2, Search, X, ChevronLeft, ChevronRight, PencilLine, ScanLine } from "lucide-react";
+import {
+  Plus, Trash2, Search, X, ChevronLeft, ChevronRight,
+  PencilLine, ScanLine, Camera,
+} from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
-  getFoodForDate, getFoodEntries, saveFoodEntry, deleteFoodEntry, getDailyMacros,
-  getTargets, todayStr, uid,
+  getFoodForDate, getFoodEntries, saveFoodEntry, deleteFoodEntry,
+  getDailyMacros, getTargets, todayStr, uid,
 } from "@/lib/storage";
 import type { FoodEntry } from "@/lib/types";
 import { searchCommonFoods, defaultGrams, type Serving } from "@/lib/foods";
@@ -15,13 +18,13 @@ import { mealTarget } from "@/lib/nutrition";
 const BarcodeScanner = dynamic(() => import("@/components/BarcodeScanner"), { ssr: false });
 
 type Meal = FoodEntry["meal"];
-const MEALS: Meal[] = ["breakfast", "lunch", "dinner", "snack"];
+const MEALS: Meal[]      = ["breakfast", "lunch", "dinner", "snack"];
 const MEAL_EMOJI: Record<Meal, string> = { breakfast: "🍳", lunch: "🥗", dinner: "🍽️", snack: "🍎" };
 const MEAL_LABEL: Record<Meal, string> = { breakfast: "Breakfast", lunch: "Lunch", dinner: "Dinner", snack: "Snack" };
 
 type Unit = "g" | "oz" | "cup" | "tbsp" | "tsp";
-const UNIT_TO_G: Record<Unit, number> = { g: 1, oz: 28.35, cup: 240, tbsp: 15, tsp: 5 };
-const UNITS: Unit[] = ["g", "oz", "cup", "tbsp", "tsp"];
+const UNIT_TO_G: Record<Unit, number>    = { g: 1, oz: 28.35, cup: 240, tbsp: 15, tsp: 5 };
+const UNITS: Unit[]                      = ["g", "oz", "cup", "tbsp", "tsp"];
 const UNIT_PRESETS: Record<Unit, number[]> = {
   g:    [50, 100, 150, 200, 250],
   oz:   [1, 2, 3, 4, 6],
@@ -30,13 +33,13 @@ const UNIT_PRESETS: Record<Unit, number[]> = {
   tsp:  [1, 2, 3],
 };
 
-interface Macros { calories: number; protein: number; carbs: number; fat: number }
+interface Macros        { calories: number; protein: number; carbs: number; fat: number }
 interface FoodSearchResult extends Macros { name: string; servingSize?: string; servings?: Serving[] }
+interface ScanItem      { name: string; grams: number; calories: number; protein: number; carbs: number; fat: number }
 
-async function searchFood(query: string): Promise<FoodSearchResult[]> {
-  const res = await fetch(`/api/food-search?q=${encodeURIComponent(query)}`);
-  if (!res.ok) return [];
-  return res.json();
+async function searchFood(q: string): Promise<FoodSearchResult[]> {
+  const r = await fetch(`/api/food-search?q=${encodeURIComponent(q)}`);
+  return r.ok ? r.json() : [];
 }
 
 function scale(base: Macros, grams: number): Macros {
@@ -49,6 +52,27 @@ function scale(base: Macros, grams: number): Macros {
   };
 }
 
+async function compressImage(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const MAX = 1024;
+      const s = Math.min(1, MAX / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width  = Math.round(img.width  * s);
+      c.height = Math.round(img.height * s);
+      const ctx = c.getContext("2d");
+      if (!ctx) { reject(new Error("canvas")); return; }
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL("image/jpeg", 0.82).split(",")[1]);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("load")); };
+    img.src = url;
+  });
+}
+
 export default function FoodPage() {
   const today = todayStr();
   const [entries, setEntries]   = useState<FoodEntry[]>([]);
@@ -57,27 +81,37 @@ export default function FoodPage() {
   const [recent, setRecent]     = useState<FoodEntry[]>([]);
 
   const [adding, setAdding]     = useState<Meal | null>(null);
-  const [step, setStep]         = useState<"pick" | "portion" | "manual">("pick");
+  const [step, setStep]         = useState<"pick" | "portion" | "manual" | "scan">("pick");
 
-  const [searchQuery, setSearchQuery]   = useState("");
-  const [localResults, setLocalResults] = useState<FoodSearchResult[]>([]);
+  // search
+  const [searchQuery, setSearchQuery]     = useState("");
+  const [localResults, setLocalResults]   = useState<FoodSearchResult[]>([]);
   const [searchResults, setSearchResults] = useState<FoodSearchResult[]>([]);
-  const [searching, setSearching]       = useState(false);
+  const [searching, setSearching]         = useState(false);
 
-  const [base, setBase]         = useState<FoodSearchResult | null>(null);
-  const [amount, setAmount]     = useState("100");
-  const [unit, setUnit]         = useState<Unit>("g");
+  // portion
+  const [base, setBase]   = useState<FoodSearchResult | null>(null);
+  const [amount, setAmount] = useState("100");
+  const [unit, setUnit]   = useState<Unit>("g");
+
+  // barcode
   const [scanning, setScanning] = useState(false);
 
+  // photo scan
+  const [scanItems, setScanItems]     = useState<ScanItem[]>([]);
+  const [scanLoading, setScanLoading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  // manual
   const [manual, setManual] = useState({ name: "", calories: "", protein: "", carbs: "", fat: "" });
+
   const searchRef = useRef<ReturnType<typeof setTimeout>>();
 
-  // Derive effective grams from current amount + unit
   const effectiveGrams = (parseFloat(amount) || 0) * UNIT_TO_G[unit];
   const preview = base ? scale(base, effectiveGrams) : null;
 
   function getRecentFoods(): FoodEntry[] {
-    const all = getFoodEntries();
+    const all  = getFoodEntries();
     const seen = new Set<string>();
     const out: FoodEntry[] = [];
     for (const e of [...all].reverse()) {
@@ -111,55 +145,78 @@ export default function FoodPage() {
   }, [searchQuery]);
 
   function openSheet(meal: Meal) {
-    setAdding(meal);
-    setStep("pick");
-    setSearchQuery("");
-    setSearchResults([]);
-    setLocalResults([]);
-    setBase(null);
-    setAmount("100");
-    setUnit("g");
+    setAdding(meal); setStep("pick");
+    setSearchQuery(""); setSearchResults([]); setLocalResults([]);
+    setBase(null); setAmount("100"); setUnit("g");
+    setScanItems([]); setScanLoading(false);
     setManual({ name: "", calories: "", protein: "", carbs: "", fat: "" });
   }
   function closeSheet() { setAdding(null); }
 
   function pickFood(r: FoodSearchResult) {
-    setBase(r);
-    setAmount(String(defaultGrams(r)));
-    setUnit("g");
-    setStep("portion");
+    setBase(r); setAmount(String(defaultGrams(r))); setUnit("g"); setStep("portion");
   }
 
-  // When user switches unit, auto-convert the current amount
-  function changeUnit(newUnit: Unit) {
-    const curG = (parseFloat(amount) || 0) * UNIT_TO_G[unit];
-    if (curG > 0) {
-      const converted = curG / UNIT_TO_G[newUnit];
-      setAmount(String(Math.round(converted * 10) / 10));
+  function changeUnit(u: Unit) {
+    const g = (parseFloat(amount) || 0) * UNIT_TO_G[unit];
+    if (g > 0) setAmount(String(Math.round((g / UNIT_TO_G[u]) * 10) / 10));
+    setUnit(u);
+  }
+
+  async function handleImageScan(file: File) {
+    setScanLoading(true); setScanItems([]); setStep("scan");
+    try {
+      const image = await compressImage(file);
+      const res   = await fetch("/api/food-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image, mimeType: "image/jpeg" }),
+      });
+      if (!res.ok) throw new Error("scan failed");
+      const data = (await res.json()) as { items?: ScanItem[] };
+      setScanItems(data.items ?? []);
+    } catch {
+      toast.error("Couldn’t analyze the photo — try again or add manually");
+      setStep("pick");
+    } finally {
+      setScanLoading(false);
     }
-    setUnit(newUnit);
+  }
+
+  function addScanItem(item: ScanItem) {
+    if (!adding) return;
+    saveFoodEntry({ id: uid(), date: today, meal: adding, name: item.name,
+      calories: item.calories, protein: item.protein, carbs: item.carbs, fat: item.fat, grams: item.grams });
+    setScanItems((p) => p.filter((x) => x !== item));
+    reload();
+    toast.success(`${item.name} added`);
+  }
+
+  function addAllScanItems() {
+    if (!adding || !scanItems.length) return;
+    scanItems.forEach((item) =>
+      saveFoodEntry({ id: uid(), date: today, meal: adding, name: item.name,
+        calories: item.calories, protein: item.protein, carbs: item.carbs, fat: item.fat, grams: item.grams })
+    );
+    reload();
+    toast.success(`${scanItems.length} item${scanItems.length > 1 ? "s" : ""} added to ${MEAL_LABEL[adding].toLowerCase()}`);
+    closeSheet();
   }
 
   async function lookupBarcode(code: string) {
     setScanning(false);
     try {
       const res = await fetch(`/api/barcode?code=${encodeURIComponent(code)}`);
-      if (!res.ok) { toast.error("Product not found — try search or manual entry"); return; }
-      const r: FoodSearchResult = await res.json();
-      pickFood(r);
-    } catch {
-      toast.error("Barcode lookup failed");
-    }
+      if (!res.ok) { toast.error("Product not found"); return; }
+      pickFood(await res.json());
+    } catch { toast.error("Barcode lookup failed"); }
   }
 
   function logScaled() {
     if (!adding || !base) return;
     if (effectiveGrams <= 0) { toast.error("Enter a portion size"); return; }
-    saveFoodEntry({
-      id: uid(), date: today, meal: adding, name: base.name,
-      ...scale(base, effectiveGrams),
-      grams: Math.round(effectiveGrams),
-    });
+    saveFoodEntry({ id: uid(), date: today, meal: adding, name: base.name,
+      ...scale(base, effectiveGrams), grams: Math.round(effectiveGrams) });
     reload();
     toast.success(`${base.name} added to ${MEAL_LABEL[adding].toLowerCase()}`);
     closeSheet();
@@ -173,34 +230,33 @@ export default function FoodPage() {
     const c   = parseFloat(manual.carbs)    || 0;
     const f   = parseFloat(manual.fat)      || 0;
     if (cal <= 0 && p <= 0 && c <= 0 && f <= 0) { toast.error("Enter calories or macros"); return; }
-    saveFoodEntry({
-      id: uid(), date: today, meal: adding, name: manual.name.trim(),
-      calories: cal || Math.round(p * 4 + c * 4 + f * 9),
-      protein: p, carbs: c, fat: f,
-    });
-    reload();
-    toast.success("Food logged");
-    closeSheet();
+    saveFoodEntry({ id: uid(), date: today, meal: adding, name: manual.name.trim(),
+      calories: cal || Math.round(p * 4 + c * 4 + f * 9), protein: p, carbs: c, fat: f });
+    reload(); toast.success("Food logged"); closeSheet();
   }
 
   function quickAdd(meal: Meal, f: FoodEntry) {
-    const { id: _id, date: _date, meal: _meal, ...rest } = f;
+    const { id: _a, date: _b, meal: _c, ...rest } = f;
     saveFoodEntry({ ...rest, id: uid(), date: today, meal });
-    reload();
-    toast.success(`${f.name} added`);
+    reload(); toast.success(`${f.name} added`);
   }
 
   const remaining = targets.calories - macros.calories;
-  const autoCals = (() => {
-    const p = parseFloat(manual.protein) || 0;
-    const c = parseFloat(manual.carbs)   || 0;
-    const f = parseFloat(manual.fat)     || 0;
-    return Math.round(p * 4 + c * 4 + f * 9);
-  })();
-
+  const autoCals  = Math.round(
+    (parseFloat(manual.protein) || 0) * 4 +
+    (parseFloat(manual.carbs)   || 0) * 4 +
+    (parseFloat(manual.fat)     || 0) * 9
+  );
   const canLog =
     step === "portion" ? (base !== null && effectiveGrams > 0) :
-    step === "manual"  ? (manual.name.trim().length > 0) : false;
+    step === "manual"  ? manual.name.trim().length > 0 : false;
+
+  // header title helper
+  const sheetTitle =
+    step === "portion" && base ? base.name
+    : step === "manual"  ? "Manual entry"
+    : step === "scan"    ? (scanLoading ? "Analyzing…" : `${scanItems.length} item${scanItems.length !== 1 ? "s" : ""} detected`)
+    : adding ? `Add to ${MEAL_LABEL[adding]}` : "";
 
   return (
     <div className="p-4 space-y-4 pt-10 pb-24">
@@ -233,15 +289,11 @@ export default function FoodPage() {
 
       {/* Meals */}
       {MEALS.map((meal) => {
-        const mealEntries = entries.filter((e) => e.meal === meal);
-        const mealCals    = mealEntries.reduce((s, e) => s + e.calories, 0);
-        const mt          = mealTarget(meal, targets);
-        const logged      = mealEntries.reduce(
-          (a, e) => ({ p: a.p + e.protein, c: a.c + e.carbs, f: a.f + e.fat }),
-          { p: 0, c: 0, f: 0 },
-        );
-        const calPct = Math.min(100, mt.calories > 0 ? (mealCals / mt.calories) * 100 : 0);
-
+        const me      = entries.filter((e) => e.meal === meal);
+        const mealCal = me.reduce((s, e) => s + e.calories, 0);
+        const mt      = mealTarget(meal, targets);
+        const logged  = me.reduce((a, e) => ({ p: a.p + e.protein, c: a.c + e.carbs, f: a.f + e.fat }), { p: 0, c: 0, f: 0 });
+        const pct     = Math.min(100, mt.calories > 0 ? (mealCal / mt.calories) * 100 : 0);
         return (
           <div key={meal} className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-2xl overflow-hidden">
             <div className="px-4 pt-3 pb-2.5">
@@ -255,9 +307,8 @@ export default function FoodPage() {
                 </div>
                 <div className="text-right">
                   <p className="text-sm font-semibold">
-                    <span className={mealCals > 0 ? "text-white" : "text-gray-600"}>{mealCals}</span>
-                    <span className="text-gray-600 font-normal">/{mt.calories}</span>
-                    <span className="text-gray-600 font-normal text-xs"> kcal</span>
+                    <span className={mealCal > 0 ? "text-white" : "text-gray-600"}>{mealCal}</span>
+                    <span className="text-gray-600 font-normal">/{mt.calories} kcal</span>
                   </p>
                   <p className="text-[10px] text-gray-600">
                     P {Math.round(logged.p)}/{mt.protein} · C {Math.round(logged.c)}/{mt.carbs} · F {Math.round(logged.f)}/{mt.fat}
@@ -265,51 +316,42 @@ export default function FoodPage() {
                 </div>
               </div>
               <div className="mt-2 h-1 bg-[#2a2a2a] rounded-full overflow-hidden">
-                <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${calPct}%` }} />
+                <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
               </div>
               <p className="mt-1 text-[10px] text-gray-600">{mt.note}</p>
             </div>
-
-            {mealEntries.length > 0 && (
+            {me.length > 0 && (
               <div className="border-t border-[#2a2a2a] divide-y divide-[#1f1f1f]">
-                {mealEntries.map((e) => (
+                {me.map((e) => (
                   <div key={e.id} className="px-4 py-2.5 flex items-center justify-between">
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm truncate">
-                        {e.name}
-                        {e.grams ? <span className="text-gray-600"> · {e.grams}g</span> : null}
-                      </p>
+                      <p className="text-sm truncate">{e.name}{e.grams ? <span className="text-gray-600"> · {e.grams}g</span> : null}</p>
                       <p className="text-xs text-gray-500">{e.calories} kcal · P {e.protein}g · C {e.carbs}g · F {e.fat}g</p>
                     </div>
-                    <button
-                      onClick={() => { deleteFoodEntry(e.id); reload(); }}
-                      className="ml-3 text-gray-600 hover:text-red-400 p-1.5 shrink-0"
-                    >
+                    <button onClick={() => { deleteFoodEntry(e.id); reload(); }} className="ml-3 text-gray-600 hover:text-red-400 p-1.5 shrink-0">
                       <Trash2 size={15} />
                     </button>
                   </div>
                 ))}
               </div>
             )}
-
             <div className="border-t border-[#2a2a2a]">
               <button
                 onClick={() => openSheet(meal)}
                 className="w-full px-4 py-3 flex items-center gap-2 text-blue-400 text-sm font-medium active:bg-[#222] transition-colors"
               >
-                <Plus size={16} />
-                Add food to {MEAL_LABEL[meal].toLowerCase()}
+                <Plus size={16} /> Add food to {MEAL_LABEL[meal].toLowerCase()}
               </button>
             </div>
           </div>
         );
       })}
 
-      {/* ───────────── Add sheet ───────────── */}
+      {/* ───── Add sheet ───── */}
       {adding && (
         <div
           className="fixed inset-0 z-50 flex items-end"
-          style={{ backgroundColor: "rgba(0,0,0,0.7)" }}
+          style={{ backgroundColor: "rgba(0,0,0,0.75)" }}
           onClick={closeSheet}
         >
           <div
@@ -331,20 +373,12 @@ export default function FoodPage() {
                   </button>
                 )}
                 <div>
-                  <h3 className="font-bold text-base">
-                    {step === "portion" && base
-                      ? base.name
-                      : step === "manual"
-                      ? "Manual entry"
-                      : `Add to ${MEAL_LABEL[adding]}`}
-                  </h3>
+                  <h3 className="font-bold text-base">{sheetTitle}</h3>
                   {step === "pick" && (
                     <p className="text-xs text-gray-500">{MEAL_EMOJI[adding]} {MEAL_LABEL[adding]}</p>
                   )}
                   {step === "portion" && base && (
-                    <p className="text-xs text-gray-500">
-                      {base.calories} kcal · P {base.protein}g · C {base.carbs}g · F {base.fat}g per 100g
-                    </p>
+                    <p className="text-xs text-gray-500">{base.calories} kcal · P {base.protein}g · C {base.carbs}g · F {base.fat}g per 100g</p>
                   )}
                 </div>
               </div>
@@ -353,12 +387,13 @@ export default function FoodPage() {
               </button>
             </div>
 
-            {/* ── Scrollable body ── */}
+            {/* Scrollable body */}
             <div className="overflow-y-auto flex-1 px-5 py-4 space-y-4">
 
-              {/* STEP: PICK */}
+              {/* ── PICK ── */}
               {step === "pick" && (
                 <>
+                  {/* Search + barcode */}
                   <div className="flex gap-2">
                     <div className="relative flex-1">
                       <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
@@ -378,63 +413,70 @@ export default function FoodPage() {
                     </button>
                   </div>
 
+                  {/* 📷 Photo scan button */}
+                  <button
+                    onClick={() => fileRef.current?.click()}
+                    className="w-full flex items-center justify-center gap-2.5 py-3.5 rounded-xl border border-green-500/40 bg-green-500/5 text-sm text-green-400 font-medium active:bg-green-500/10 transition-colors"
+                  >
+                    <Camera size={17} />
+                    Snap or pick a photo to auto-log your meal
+                  </button>
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleImageScan(file);
+                      e.target.value = "";
+                    }}
+                  />
+
                   {/* Search results */}
                   {(() => {
                     const localNames = new Set(localResults.map((r) => r.name.toLowerCase()));
                     const branded    = searchResults.filter((r) => !localNames.has(r.name.toLowerCase()));
                     const combined   = [...localResults, ...branded];
-                    if (combined.length > 0) {
-                      return (
-                        <div className="space-y-1.5">
-                          {combined.map((r, i) => (
-                            <button
-                              key={i}
-                              onClick={() => pickFood(r)}
-                              className="w-full text-left px-4 py-3 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl active:bg-[#222] transition-colors flex items-center gap-3"
-                            >
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium truncate">{r.name}</p>
-                                <p className="text-xs text-gray-500 mt-0.5">
-                                  {r.calories} kcal · P {r.protein}g · C {r.carbs}g · F {r.fat}g
-                                  <span className="text-gray-600"> / 100g</span>
-                                </p>
-                              </div>
-                              <ChevronRight size={16} className="text-gray-600 shrink-0" />
-                            </button>
-                          ))}
-                        </div>
-                      );
-                    }
-                    if (searching)           return <p className="text-xs text-gray-500 text-center py-4">Searching…</p>;
-                    if (searchQuery.trim())  return <p className="text-xs text-gray-500 text-center py-4">No matches — try manual entry below.</p>;
+                    if (combined.length > 0) return (
+                      <div className="space-y-1.5">
+                        {combined.map((r, i) => (
+                          <button key={i} onClick={() => pickFood(r)}
+                            className="w-full text-left px-4 py-3 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl active:bg-[#222] transition-colors flex items-center gap-3">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium truncate">{r.name}</p>
+                              <p className="text-xs text-gray-500 mt-0.5">{r.calories} kcal · P {r.protein}g · C {r.carbs}g · F {r.fat}g <span className="text-gray-600">/ 100g</span></p>
+                            </div>
+                            <ChevronRight size={16} className="text-gray-600 shrink-0" />
+                          </button>
+                        ))}
+                      </div>
+                    );
+                    if (searching)          return <p className="text-xs text-gray-500 text-center py-3">Searching…</p>;
+                    if (searchQuery.trim()) return <p className="text-xs text-gray-500 text-center py-3">No matches — try manual entry below.</p>;
                     return null;
                   })()}
 
-                  {/* Recent foods */}
+                  {/* Recent */}
                   {!searchQuery.trim() && recent.length > 0 && (
                     <div className="space-y-2">
                       <p className="text-xs text-gray-500 uppercase tracking-wider font-medium">Recently added</p>
                       <div className="space-y-1.5">
                         {recent.map((f) => (
-                          <button
-                            key={f.id}
-                            onClick={() => quickAdd(adding, f)}
-                            className="w-full text-left px-4 py-2.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl active:bg-[#222] transition-colors flex items-center justify-between"
-                          >
+                          <button key={f.id} onClick={() => quickAdd(adding, f)}
+                            className="w-full text-left px-4 py-2.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl active:bg-[#222] transition-colors flex items-center justify-between">
                             <div className="min-w-0 flex-1">
                               <p className="text-sm truncate">{f.name}</p>
                               <p className="text-xs text-gray-500">{f.calories} kcal</p>
                             </div>
-                            <span className="text-xs text-blue-400 font-semibold shrink-0 ml-2 flex items-center gap-1">
-                              <Plus size={12} /> Add
-                            </span>
+                            <span className="text-xs text-blue-400 font-semibold shrink-0 ml-2 flex items-center gap-1"><Plus size={12} /> Add</span>
                           </button>
                         ))}
                       </div>
                     </div>
                   )}
 
-                  {/* Manual entry */}
+                  {/* Manual */}
                   <button
                     onClick={() => { setManual((m) => ({ ...m, name: searchQuery })); setStep("manual"); }}
                     className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-dashed border-[#333] text-sm text-gray-400 active:bg-[#1a1a1a] transition-colors"
@@ -444,84 +486,103 @@ export default function FoodPage() {
                 </>
               )}
 
-              {/* STEP: PORTION */}
+              {/* ── SCAN ── */}
+              {step === "scan" && (
+                <>
+                  {scanLoading ? (
+                    <div className="flex flex-col items-center justify-center py-14 space-y-5">
+                      <div className="w-20 h-20 rounded-3xl bg-green-500/10 border border-green-500/30 flex items-center justify-center">
+                        <Camera size={34} className="text-green-400 animate-pulse" />
+                      </div>
+                      <div className="text-center space-y-1">
+                        <p className="font-semibold text-base">Analyzing your meal…</p>
+                        <p className="text-xs text-gray-500">Claude Vision is identifying foods and estimating portions</p>
+                      </div>
+                    </div>
+                  ) : scanItems.length > 0 ? (
+                    <div className="space-y-2">
+                      <p className="text-xs text-gray-500">Tap + to add items one by one, or use “Add all” below.</p>
+                      {scanItems.map((item, i) => (
+                        <div key={i} className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl p-3.5 flex items-center gap-3">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium">{item.name}</p>
+                            <p className="text-xs text-gray-500">~{item.grams}g · {item.calories} kcal</p>
+                            <p className="text-xs text-gray-600">P {item.protein}g · C {item.carbs}g · F {item.fat}g</p>
+                          </div>
+                          <button
+                            onClick={() => addScanItem(item)}
+                            className="shrink-0 w-9 h-9 bg-blue-600 rounded-full flex items-center justify-center active:bg-blue-500 transition-colors"
+                          >
+                            <Plus size={16} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center py-12 space-y-4">
+                      <p className="text-gray-400 text-sm">No food detected in this photo</p>
+                      <button onClick={() => fileRef.current?.click()} className="text-blue-400 text-sm font-medium">
+                        Try a different photo
+                      </button>
+                      <button onClick={() => setStep("pick")} className="text-gray-500 text-xs">
+                        Add manually instead
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* ── PORTION ── */}
               {step === "portion" && base && (
                 <>
-                  {/* Common servings from food DB */}
                   {base.servings && base.servings.length > 0 && (
                     <div className="space-y-2">
                       <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Common servings</p>
                       <div className="flex gap-2 flex-wrap">
-                        {base.servings.map((sv) => {
-                          const isActive = unit === "g" && String(sv.grams) === amount;
-                          return (
-                            <button
-                              key={sv.label}
-                              onClick={() => { setUnit("g"); setAmount(String(sv.grams)); }}
-                              className={cn(
-                                "px-3.5 py-1.5 rounded-full text-sm font-medium border transition-colors",
-                                isActive
-                                  ? "bg-blue-600 border-blue-600 text-white"
-                                  : "border-[#2a2a2a] text-gray-400 bg-[#1a1a1a]",
-                              )}
-                            >
-                              {sv.label}
-                            </button>
-                          );
-                        })}
+                        {base.servings.map((sv) => (
+                          <button key={sv.label}
+                            onClick={() => { setUnit("g"); setAmount(String(sv.grams)); }}
+                            className={cn(
+                              "px-3.5 py-1.5 rounded-full text-sm font-medium border transition-colors",
+                              unit === "g" && String(sv.grams) === amount
+                                ? "bg-blue-600 border-blue-600 text-white"
+                                : "border-[#2a2a2a] text-gray-400 bg-[#1a1a1a]",
+                            )}>
+                            {sv.label}
+                          </button>
+                        ))}
                       </div>
                     </div>
                   )}
-
-                  {/* Unit selector */}
                   <div className="space-y-2">
                     <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Unit</p>
                     <div className="flex gap-1.5">
                       {UNITS.map((u) => (
-                        <button
-                          key={u}
-                          onClick={() => changeUnit(u)}
+                        <button key={u} onClick={() => changeUnit(u)}
                           className={cn(
                             "flex-1 py-2 rounded-lg text-xs font-semibold border transition-colors",
-                            unit === u
-                              ? "bg-blue-600 border-blue-600 text-white"
-                              : "border-[#2a2a2a] text-gray-400 bg-[#1a1a1a]",
-                          )}
-                        >
+                            unit === u ? "bg-blue-600 border-blue-600 text-white" : "border-[#2a2a2a] text-gray-400 bg-[#1a1a1a]",
+                          )}>
                           {u}
                         </button>
                       ))}
                     </div>
                   </div>
-
-                  {/* Amount input */}
                   <div className="space-y-2">
                     <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Amount</p>
                     <div className="relative">
-                      <input
-                        type="number"
-                        inputMode="decimal"
+                      <input type="number" inputMode="decimal"
                         className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl px-4 pr-16 py-3 text-3xl font-bold text-center text-white outline-none focus:border-blue-500"
-                        value={amount}
-                        onChange={(e) => setAmount(e.target.value)}
-                      />
-                      <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 text-sm font-medium pointer-events-none">
-                        {unit}
-                      </span>
+                        value={amount} onChange={(e) => setAmount(e.target.value)} />
+                      <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 text-sm font-medium pointer-events-none">{unit}</span>
                     </div>
-                    {/* Quick presets for current unit */}
                     <div className="flex gap-1.5">
                       {UNIT_PRESETS[unit].map((p) => (
-                        <button
-                          key={p}
-                          onClick={() => setAmount(String(p))}
+                        <button key={p} onClick={() => setAmount(String(p))}
                           className={cn(
                             "flex-1 py-1.5 rounded-lg text-xs font-medium border transition-colors",
-                            String(p) === amount
-                              ? "bg-blue-600 border-blue-600 text-white"
-                              : "border-[#2a2a2a] text-gray-400 bg-[#1a1a1a]",
-                          )}
-                        >
+                            String(p) === amount ? "bg-blue-600 border-blue-600 text-white" : "border-[#2a2a2a] text-gray-400 bg-[#1a1a1a]",
+                          )}>
                           {p}
                         </button>
                       ))}
@@ -530,34 +591,20 @@ export default function FoodPage() {
                       <p className="text-xs text-gray-600 text-center">≈ {Math.round(effectiveGrams)}g</p>
                     )}
                   </div>
-
-                  {/* Live macro preview */}
                   {preview && (
                     <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-2xl p-4">
-                      <p className="text-3xl font-bold">
-                        {preview.calories}
-                        <span className="text-base font-normal text-gray-500 ml-1">kcal</span>
-                      </p>
+                      <p className="text-3xl font-bold">{preview.calories}<span className="text-base font-normal text-gray-500 ml-1">kcal</span></p>
                       <div className="grid grid-cols-3 gap-2 mt-3 text-center">
-                        <div className="bg-[#111] rounded-xl py-2">
-                          <p className="text-lg font-bold text-blue-400">{preview.protein}g</p>
-                          <p className="text-[10px] text-gray-500">Protein</p>
-                        </div>
-                        <div className="bg-[#111] rounded-xl py-2">
-                          <p className="text-lg font-bold text-yellow-400">{preview.carbs}g</p>
-                          <p className="text-[10px] text-gray-500">Carbs</p>
-                        </div>
-                        <div className="bg-[#111] rounded-xl py-2">
-                          <p className="text-lg font-bold text-red-400">{preview.fat}g</p>
-                          <p className="text-[10px] text-gray-500">Fat</p>
-                        </div>
+                        <div className="bg-[#111] rounded-xl py-2"><p className="text-lg font-bold text-blue-400">{preview.protein}g</p><p className="text-[10px] text-gray-500">Protein</p></div>
+                        <div className="bg-[#111] rounded-xl py-2"><p className="text-lg font-bold text-yellow-400">{preview.carbs}g</p><p className="text-[10px] text-gray-500">Carbs</p></div>
+                        <div className="bg-[#111] rounded-xl py-2"><p className="text-lg font-bold text-red-400">{preview.fat}g</p><p className="text-[10px] text-gray-500">Fat</p></div>
                       </div>
                     </div>
                   )}
                 </>
               )}
 
-              {/* STEP: MANUAL */}
+              {/* ── MANUAL ── */}
               {step === "manual" && (
                 <>
                   <input
@@ -567,17 +614,14 @@ export default function FoodPage() {
                     onChange={(e) => setManual((m) => ({ ...m, name: e.target.value }))}
                   />
                   <div className="grid grid-cols-2 gap-2.5">
-                    <NumInput label="Calories"   value={manual.calories} onChange={(v) => setManual((m) => ({ ...m, calories: v }))} />
+                    <NumInput label="Calories"    value={manual.calories} onChange={(v) => setManual((m) => ({ ...m, calories: v }))} />
                     <NumInput label="Protein (g)" value={manual.protein}  onChange={(v) => setManual((m) => ({ ...m, protein: v }))} />
                     <NumInput label="Carbs (g)"   value={manual.carbs}    onChange={(v) => setManual((m) => ({ ...m, carbs: v }))} />
                     <NumInput label="Fat (g)"     value={manual.fat}      onChange={(v) => setManual((m) => ({ ...m, fat: v }))} />
                   </div>
                   {!manual.calories && autoCals > 0 && (
-                    <button
-                      onClick={() => setManual((m) => ({ ...m, calories: String(autoCals) }))}
-                      className="text-xs text-blue-400 text-left"
-                    >
-                      ≈ {autoCals} kcal calculated from macros — tap to use
+                    <button onClick={() => setManual((m) => ({ ...m, calories: String(autoCals) }))} className="text-xs text-blue-400 text-left">
+                      ≈ {autoCals} kcal from macros — tap to use
                     </button>
                   )}
                 </>
@@ -585,23 +629,31 @@ export default function FoodPage() {
 
             </div>{/* end scrollable body */}
 
-            {/* ── Fixed footer: Log button — stays above keyboard & home bar ── */}
+            {/* Fixed footer */}
             {(step === "portion" || step === "manual") && (
-              <div
-                className="px-5 pt-3 shrink-0 border-t border-[#2a2a2a] bg-[#111]"
-                style={{ paddingBottom: "max(1.25rem, env(safe-area-inset-bottom, 1.25rem))" }}
-              >
+              <div className="px-5 pt-3 shrink-0 border-t border-[#2a2a2a] bg-[#111]"
+                style={{ paddingBottom: "max(1.25rem, env(safe-area-inset-bottom, 1.25rem))" }}>
                 <button
                   onClick={step === "portion" ? logScaled : logManual}
                   disabled={!canLog}
                   className={cn(
                     "w-full py-4 rounded-2xl text-base font-bold transition-colors",
-                    canLog
-                      ? "bg-blue-600 text-white active:bg-blue-500"
-                      : "bg-[#2a2a2a] text-gray-600 cursor-not-allowed",
+                    canLog ? "bg-blue-600 text-white active:bg-blue-500" : "bg-[#2a2a2a] text-gray-600 cursor-not-allowed",
                   )}
                 >
                   Log to {MEAL_LABEL[adding]}
+                </button>
+              </div>
+            )}
+
+            {step === "scan" && !scanLoading && scanItems.length > 0 && (
+              <div className="px-5 pt-3 shrink-0 border-t border-[#2a2a2a] bg-[#111]"
+                style={{ paddingBottom: "max(1.25rem, env(safe-area-inset-bottom, 1.25rem))" }}>
+                <button
+                  onClick={addAllScanItems}
+                  className="w-full py-4 rounded-2xl text-base font-bold bg-green-600 text-white active:bg-green-500 transition-colors"
+                >
+                  Add all {scanItems.length} item{scanItems.length !== 1 ? "s" : ""} to {MEAL_LABEL[adding]}
                 </button>
               </div>
             )}
@@ -613,47 +665,26 @@ export default function FoodPage() {
   );
 }
 
-// ── Sub-components ─────────────────────────────────────────────────────────────
-
-function MacroChip({
-  label, value, target, color,
-}: {
-  label: string; value: number; target: number; color: string;
-}) {
+function MacroChip({ label, value, target, color }: { label: string; value: number; target: number; color: string }) {
   const pct = Math.min(100, target > 0 ? (value / target) * 100 : 0);
   return (
     <div className="space-y-1.5">
       <p className="text-xs text-gray-500">{label}</p>
-      <p className={cn("font-bold text-sm", color)}>
-        {Math.round(value)}
-        <span className="text-gray-600 font-normal text-xs">/{target}g</span>
-      </p>
+      <p className={cn("font-bold text-sm", color)}>{Math.round(value)}<span className="text-gray-600 font-normal text-xs">/{target}g</span></p>
       <div className="h-1 bg-[#2a2a2a] rounded-full overflow-hidden">
-        <div
-          className={cn("h-full rounded-full", color.replace("text-", "bg-"))}
-          style={{ width: `${pct}%` }}
-        />
+        <div className={cn("h-full rounded-full", color.replace("text-", "bg-"))} style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
 }
 
-function NumInput({
-  label, value, onChange,
-}: {
-  label: string; value: string; onChange: (v: string) => void;
-}) {
+function NumInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
   return (
     <div className="space-y-1">
       <label className="text-xs text-gray-500">{label}</label>
-      <input
-        type="number"
-        inputMode="decimal"
+      <input type="number" inputMode="decimal" placeholder="0"
         className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-blue-500"
-        value={value}
-        placeholder="0"
-        onChange={(e) => onChange(e.target.value)}
-      />
+        value={value} onChange={(e) => onChange(e.target.value)} />
     </div>
   );
 }
